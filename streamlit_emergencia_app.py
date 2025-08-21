@@ -60,7 +60,7 @@ class PracticalANNModel:
         return pd.DataFrame({"EMERREL(0-1)": emerrel_diff, "Nivel_Emergencia_relativa": riesgo})
 
 # ------------------ Interfaz Streamlit ------------------
-st.title("Predicción de Emergencia Agrícola con ANN")
+st.title("Predicción de Emergencia Agrícola EUPHO - NAPOSTA 2025)
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
@@ -100,7 +100,7 @@ if uploaded_files:
         nombre = Path(file.name).stem
 
         # --- Gráfico 1 ---
-        st.subheader("EMERGENCIA RELATIVA DIARIA - BORDENAVE")
+        st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO - NAPOSTA 2025")
         colores = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
         fig_er = go.Figure()
         fig_er.add_bar(x=pred_vis["Fecha"], y=pred_vis["EMERREL(0-1)"],
@@ -116,7 +116,7 @@ if uploaded_files:
         st.plotly_chart(fig_er, theme="streamlit")
 
         # --- Gráfico 2 ---
-        st.subheader("EMERGENCIA ACUMULADA DIARIA - BORDENAVE")
+        st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO - NAPOSTA 2025")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=pred_vis["Fecha"], y=pred_vis["EMEAC (%) - máximo"],
                                  mode="lines", line=dict(width=0), name="Máximo"))
