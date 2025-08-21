@@ -1,10 +1,18 @@
-
 import streamlit as st
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from pathlib import Path
+import plotly.graph_objects as go  # usamos plotly como en el código precedente
+
+# ====== Constantes de estilo/umbrales ======
+THR_BAJO_MEDIO = 0.020
+THR_MEDIO_ALTO = 0.079
+COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
+COLOR_FALLBACK = "#808080"
+
+# Denominadores de EMEAC
+EMEAC_MIN_DEN = 1.60
+EMEAC_MAX_DEN = 2.10
 
 # ------------------- Modelo ANN con pesos embebidos ---------------------
 class PracticalANNModel:
@@ -77,17 +85,9 @@ class PracticalANNModel:
 # ------------------ Interfaz Streamlit ------------------
 st.title("Predicción de Emergencia Agrícola con ANN")
 
-st.info(
-    "**Formato requerido del archivo Excel:**\n"
-    "- Columnas: `Julian_days`, `TMAX`, `TMIN`, `Prec`\n"
-    "- El día 1 debe corresponder al **1 de septiembre de 2025**.\n"
-    "- Asegúrate de que los nombres de las columnas estén escritos exactamente igual."
-)
-
-
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
-    "Umbral de EMEAC para 100%",
+    "Umbral ajustable de EMEAC para 100%",
     min_value=0.5,
     max_value=2.84,
     value=1.75,
@@ -103,16 +103,7 @@ uploaded_files = st.file_uploader(
 
 modelo = PracticalANNModel()
 
-def obtener_colores(niveles):
-    return niveles.map({"Bajo": "green", "Medio": "orange", "Alto": "red"})
-
-legend_labels = [
-    plt.Line2D([0], [0], color='green', lw=4, label='Bajo'),
-    plt.Line2D([0], [0], color='orange', lw=4, label='Medio'),
-    plt.Line2D([0], [0], color='red', lw=4, label='Alto')
-]
-
-# NUEVO rango de fechas
+# Rango de fechas
 fecha_inicio = pd.to_datetime("2025-09-01")
 fecha_fin = pd.to_datetime("2026-03-01")
 
@@ -130,61 +121,130 @@ if uploaded_files:
         pred["Fecha"] = fechas
         pred["Julian_days"] = df["Julian_days"]
         pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
-        pred["EMEAC (0-1)"] = pred["EMERREL acumulado"] / umbral_usuario
-        pred["EMEAC (%)"] = pred["EMEAC (0-1)"] * 100
+
+        # Cálculos de EMEAC con tres denominadores
+        pred["EMEAC (0-1) - mínimo"]    = pred["EMERREL acumulado"] / EMEAC_MIN_DEN
+        pred["EMEAC (0-1) - máximo"]    = pred["EMERREL acumulado"] / EMEAC_MAX_DEN
+        pred["EMEAC (0-1) - ajustable"] = pred["EMERREL acumulado"] / umbral_usuario
+        for col in ["EMEAC (0-1) - mínimo", "EMEAC (0-1) - máximo", "EMEAC (0-1) - ajustable"]:
+            pred[col.replace("(0-1)", "(%)")] = (pred[col] * 100).clip(0, 100)
+
+        # Media móvil 5 días
+        pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
+
+        # Filtrar rango visible
+        m = (pred["Fecha"] >= fecha_inicio) & (pred["Fecha"] <= fecha_fin)
+        pred_vis = pred.loc[m].copy()
 
         nombre = Path(file.name).stem
-        colores = obtener_colores(pred["Nivel_Emergencia_relativa"])
 
-        st.subheader(f"EMERREL (0-1) - {nombre}")
-        # Calcular media móvil de 5 días
-        pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
-        fig_er, ax_er = plt.subplots(figsize=(14, 5), dpi=150)
-        ax_er.bar(pred["Fecha"], pred["EMERREL(0-1)"], color=colores, label="EMERREL (0-1)")
-        ax_er.plot(pred["Fecha"], pred["EMERREL_MA5"], color="blue", linewidth=2.2, label="Media móvil 5 días")
-        ax_er.set_title(f"Emergencia Relativa Diaria - {nombre}")
-        ax_er.set_xlabel("Fecha")
-        ax_er.set_ylabel("EMERREL (0-1)")
-        ax_er.grid(True, linestyle="--", alpha=0.5)
-        ax_er.set_xlim(fecha_inicio, fecha_fin)
-        ax_er.legend(handles=legend_labels + [plt.Line2D([0], [0], color="blue", lw=2, label="Media móvil 5 días")], title="Niveles")
-        ax_er.xaxis.set_major_locator(mdates.MonthLocator())
-        ax_er.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        plt.setp(ax_er.xaxis.get_majorticklabels(), rotation=0)
-        st.pyplot(fig_er)
+        # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA (Plotly) =====================
+        st.subheader("EMERGENCIA RELATIVA DIARIA - BORDENAVE")
+        colores = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
 
-        st.subheader(f"EMEAC (%) - {nombre}")
-        fechas_validas = pd.to_datetime(pred["Fecha"])
-        emeac_pct = pd.to_numeric(pred["EMEAC (%)"], errors="coerce")
-        validez = ~(fechas_validas.isna() | emeac_pct.isna())
-        fechas_plot = fechas_validas[validez].to_numpy()
-        emeac_plot = emeac_pct[validez].to_numpy()
+        fig_er = go.Figure()
+        fig_er.add_bar(
+            x=pred_vis["Fecha"],
+            y=pred_vis["EMERREL(0-1)"],
+            marker=dict(color=colores),
+            customdata=pred_vis["Nivel_Emergencia_relativa"],
+            hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
+            name="EMERREL (0-1)"
+        )
+        fig_er.add_trace(go.Scatter(
+            x=pred_vis["Fecha"],
+            y=pred_vis["EMERREL_MA5"],
+            mode="lines",
+            name="Media móvil 5 días",
+            hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"
+        ))
+        fig_er.add_trace(go.Scatter(
+            x=pred_vis["Fecha"],
+            y=pred_vis["EMERREL_MA5"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tozeroy",
+            fillcolor="rgba(135, 206, 250, 0.3)",
+            hoverinfo="skip",
+            showlegend=False
+        ))
+        fig_er.add_hline(y=THR_BAJO_MEDIO, line_dash="dot", line_color=COLOR_MAP["Bajo"], annotation_text=f"Bajo ≤ {THR_BAJO_MEDIO:.3f}")
+        fig_er.add_hline(y=THR_MEDIO_ALTO, line_dash="dot", line_color=COLOR_MAP["Medio"], annotation_text=f"Medio ≤ {THR_MEDIO_ALTO:.3f}")
 
-        fig_eac, ax_eac = plt.subplots(figsize=(14, 5), dpi=150)
-        ax_eac.fill_between(fechas_plot, emeac_plot, color="skyblue", alpha=0.5)
-        ax_eac.plot(fechas_plot, emeac_plot, color="blue", linewidth=2)
+        fig_er.update_layout(
+            xaxis_title="Fecha",
+            yaxis_title="EMERREL (0-1)",
+            hovermode="x unified",
+            legend_title="Referencias",
+            height=650
+        )
+        fig_er.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
+        fig_er.update_yaxes(rangemode="tozero")
+        st.plotly_chart(fig_er, use_container_width=True, theme="streamlit")
 
-        niveles = [25, 50, 75, 90]
-        colores_niveles = ['gray', 'green', 'orange', 'red']
-        for nivel, color in zip(niveles, colores_niveles):
-            ax_eac.axhline(nivel, linestyle='--', color=color, linewidth=1.5, label=f'{nivel}%')
+        # ===================== Gráfico 2: EMERGENCIA ACUMULADA DIARIA (Plotly) =====================
+        st.subheader("EMERGENCIA ACUMULADA DIARIA - BORDENAVE")
+        fig = go.Figure()
 
-        ax_eac.set_title(f"Progreso EMEAC (%) - {nombre} (Umbral: {umbral_usuario})")
-        ax_eac.set_xlabel("Fecha")
-        ax_eac.set_ylabel("EMEAC (%)")
-        ax_eac.set_ylim(0, 100)
-        ax_eac.set_xlim(fecha_inicio, fecha_fin)
-        ax_eac.grid(True, linestyle="--", alpha=0.5)
-        ax_eac.xaxis.set_major_locator(mdates.MonthLocator())
-        ax_eac.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        ax_eac.legend(title="Niveles EMEAC (%)")
-        plt.setp(ax_eac.xaxis.get_majorticklabels(), rotation=0)
-        st.pyplot(fig_eac)
+        # Banda entre mínimo y máximo
+        fig.add_trace(go.Scatter(
+            x=pred_vis["Fecha"],
+            y=pred_vis["EMEAC (%) - máximo"],
+            mode="lines",
+            line=dict(width=0),
+            name="Máximo",
+            hovertemplate="Fecha: %{x|%d-%b-%Y}<br>Máximo: %{y:.1f}%<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=pred_vis["Fecha"],
+            y=pred_vis["EMEAC (%) - mínimo"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            name="Mínimo",
+            hovertemplate="Fecha: %{x|%d-%b-%Y}<br>Mínimo: %{y:.1f}%<extra></extra>"
+        ))
 
-        st.subheader(f"Datos calculados - {nombre}")
-        tabla_filtrada = pred[["Fecha", "Nivel_Emergencia_relativa", "EMEAC (%)"]]
-        st.dataframe(tabla_filtrada)
-        csv = tabla_filtrada.to_csv(index=False).encode("utf-8")
-        st.download_button(f"Descargar CSV - {nombre}", csv, f"{nombre}_EMEAC.csv", "text/csv")
+        # Línea de umbral ajustable
+        fig.add_trace(go.Scatter(
+            x=pred_vis["Fecha"],
+            y=pred_vis["EMEAC (%) - ajustable"],
+            mode="lines",
+            line=dict(width=2.5),
+            name=f"Umbral ajustable (/{umbral_usuario:.2f})",
+            hovertemplate="Fecha: %{x|%d-%b-%Y}<br>Ajustable: %{y:.1f}%<extra></extra>"
+        ))
+
+        # Líneas horizontales 25, 50, 75, 90 %
+        for nivel in [25, 50, 75, 90]:
+            fig.add_hline(y=nivel, line_dash="dash", opacity=0.6, annotation_text=f"{nivel}%")
+
+        fig.update_layout(
+            xaxis_title="Fecha",
+            yaxis_title="EMEAC (%)",
+            yaxis=dict(range=[0, 100]),
+            hovermode="x unified",
+            legend_title="Referencias",
+            height=600
+        )
+        fig.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
+        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+
+        # ===================== Tabla =====================
+        st.subheader(f"Resultados (sep → mar) - {nombre}")
+        nivel_icono = {"Bajo": "🟢 Bajo", "Medio": "🟠 Medio", "Alto": "🔴 Alto"}
+        tabla = pred_vis[["Fecha", "Julian_days", "Nivel_Emergencia_relativa"]].copy()
+        tabla["EMEAC (%)"] = pred_vis["EMEAC (%) - ajustable"]
+        tabla["Nivel_Emergencia_relativa"] = tabla["Nivel_Emergencia_relativa"].map(nivel_icono)
+        tabla = tabla.rename(columns={"Nivel_Emergencia_relativa": "Nivel de EMERREL"})
+
+        st.dataframe(tabla, use_container_width=True)
+        csv = tabla.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            f"Descargar resultados (rango) - {nombre}",
+            csv,
+            f"{nombre}_resultados_rango.csv",
+            "text/csv"
+        )
 else:
     st.info("Sube al menos un archivo .xlsx para iniciar el análisis.")
