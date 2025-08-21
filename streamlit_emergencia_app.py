@@ -141,7 +141,7 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
     return df[["Fecha", "Julian_days", "TMAX", "TMIN", "Prec"]]
 
 # ================== App ==================
-st.title("Predicción de Emergencia Agrícola con ANN")
+st.title("Predicción de Emergencia Agrícola EUPHO- NAPOSTA 2025")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
@@ -201,7 +201,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         return
 
     # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA =====================
-    st.subheader("EMERGENCIA RELATIVA DIARIA - BORDENAVE")
+    st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO- NAPOSTA 2025")
     colores = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
 
     fig_er = go.Figure()
@@ -232,7 +232,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     st.plotly_chart(fig_er, theme="streamlit")
 
     # ===================== Gráfico 2: EMERGENCIA ACUMULADA DIARIA =====================
-    st.subheader("EMERGENCIA ACUMULADA DIARIA - BORDENAVE")
+    st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO- NAPOSTA 2025")
     fig = go.Figure()
     # Banda entre mínimo y máximo
     fig.add_trace(go.Scatter(
