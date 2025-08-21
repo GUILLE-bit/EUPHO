@@ -1,8 +1,6 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from pathlib import Path
 import plotly.graph_objects as go  # usamos plotly como en el código precedente
 
@@ -178,7 +176,7 @@ if uploaded_files:
             yaxis_title="EMERREL (0-1)",
             hovermode="x unified",
             legend_title="Referencias",
-            height=800  # AUMENTADO
+            height=650
         )
         fig_er.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
         fig_er.update_yaxes(rangemode="tozero")
@@ -227,7 +225,7 @@ if uploaded_files:
             yaxis=dict(range=[0, 100]),
             hovermode="x unified",
             legend_title="Referencias",
-            height=750  # AUMENTADO
+            height=600
         )
         fig.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
         st.plotly_chart(fig, use_container_width=True, theme="streamlit")
@@ -240,7 +238,7 @@ if uploaded_files:
         tabla["Nivel_Emergencia_relativa"] = tabla["Nivel_Emergencia_relativa"].map(nivel_icono)
         tabla = tabla.rename(columns={"Nivel_Emergencia_relativa": "Nivel de EMERREL"})
 
-        st.dataframe(tabla, use_container_width=True, height=600)  # AUMENTADO
+        st.dataframe(tabla, use_container_width=True)
         csv = tabla.to_csv(index=False).encode("utf-8")
         st.download_button(
             f"Descargar resultados (rango) - {nombre}",
@@ -250,4 +248,3 @@ if uploaded_files:
         )
 else:
     st.info("Sube al menos un archivo .xlsx para iniciar el análisis.")
-
