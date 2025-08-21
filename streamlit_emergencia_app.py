@@ -12,7 +12,7 @@ COLOR_FALLBACK = "#808080"
 
 # Denominadores de EMEAC
 EMEAC_MIN_DEN = 1.60
-EMEAC_MAX_DEN = 2.10
+EMEAC_MAX_DEN = 2.00
 
 # ------------------- Modelo ANN con pesos embebidos ---------------------
 class PracticalANNModel:
