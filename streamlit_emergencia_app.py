@@ -60,7 +60,7 @@ class PracticalANNModel:
         return pd.DataFrame({"EMERREL(0-1)": emerrel_diff, "Nivel_Emergencia_relativa": riesgo})
 
 # ------------------ Interfaz Streamlit ------------------
-st.title("Predicción de Emergencia Agrícola EUPHO - NAPOSTA 2025)
+st.title("Predicción de Emergencia Agrícola EUPHO - NAPOSTA 2025")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
