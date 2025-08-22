@@ -48,9 +48,8 @@ class PracticalANNModel:
         # IMPORTANTE: orden de entrada = [Julian_days, TMAX, TMIN, Prec]
         self.input_min = np.array([1.0, 7.7, -3.5, 0.0])
         self.input_max = np.array([148.0, 38.5, 23.5, 59.9])  # rango de entrenamiento
-        # Si se prefiere adaptar a la campaña: self.input_max[0] = 182  (pero se recomienda clipping)
 
-    def tansig(self, x): 
+    def tansig(self, x):
         return np.tanh(x)
 
     def normalize_input(self, X_real):
@@ -148,7 +147,6 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
         if df[col].isna().any():
             df[col] = df[col].interpolate(limit_direction="both")
-    # No permitir precipitación negativa
     df["Prec"] = df["Prec"].clip(lower=0)
 
     # Julian_days respecto al inicio de campaña (1/sep/2025 = día 1)
@@ -185,6 +183,14 @@ def get_model():
 
 modelo = get_model()
 
+def _clasificar_local(v: float) -> str:
+    if v < THR_BAJO_MEDIO:
+        return "Bajo"
+    elif v <= THR_MEDIO_ALTO:
+        return "Medio"
+    else:
+        return "Alto"
+
 def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     req = {"Julian_days", "TMAX", "TMIN", "Prec", "Fecha"}
     if not req.issubset(df.columns):
@@ -199,7 +205,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"Sin datos entre {fecha_inicio.date()} y {fecha_fin.date()} para {nombre}.")
         return
 
-    # Sanitizar tipos numéricos por seguridad
+    # Sanitizar tipos numéricos
     for col in ["Julian_days", "TMAX", "TMIN", "Prec"]:
         df_win[col] = pd.to_numeric(df_win[col], errors="coerce")
     if df_win[["Julian_days", "TMAX", "TMIN", "Prec"]].isna().any().any():
@@ -215,7 +221,11 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     pred["Fecha"] = fechas
     pred["Julian_days"] = df_win["Julian_days"]
 
-    # EMERREL acumulado SOLO dentro de la ventana (se corta al 31/ene)
+    # Asegurar columna de nivel por robustez
+    if "Nivel_Emergencia_relativa" not in pred.columns:
+        pred["Nivel_Emergencia_relativa"] = pred["EMERREL(0-1)"].apply(_clasificar_local)
+
+    # EMERREL acumulado SOLO dentro de la ventana
     pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
 
     # EMEAC con tres denominadores: min, max (banda), ajustable (usuario)
@@ -228,11 +238,16 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     # Media móvil 5 días
     pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
 
-    pred_vis = pred
+    pred_vis = pred.copy()
 
     # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA =====================
     st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO- NAPOSTA 2025")
-    colores = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
+    # Garantizar columna para colores (fix KeyError)
+    niveles = pred_vis.get("Nivel_Emergencia_relativa")
+    if niveles is None:
+        niveles = pred_vis["EMERREL(0-1)"].apply(_clasificar_local)
+        pred_vis["Nivel_Emergencia_relativa"] = niveles
+    colores = niveles.map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
 
     fig_er = go.Figure()
     fig_er.add_bar(
@@ -310,7 +325,8 @@ if fuente == "Subir Excel (.xlsx)":
             # Si no trae 'Fecha', la derivamos desde la campaña (1/sep/2025 = día 1)
             if "Fecha" not in df.columns and "Julian_days" in df.columns:
                 base = pd.Timestamp("2025-09-01")
-                df["Fecha"] = base + pd.to_timedelta(pd.to_numeric(df["Julian_days"], errors="coerce") - 1, unit="D")
+                jd = pd.to_numeric(df["Julian_days"], errors="coerce")
+                df["Fecha"] = base + pd.to_timedelta(jd - 1, unit="D")
             procesar_y_mostrar(df, nombre=Path(file.name).stem)
     else:
         st.info("Sube al menos un archivo .xlsx para iniciar el análisis.")
