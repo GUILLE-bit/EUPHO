@@ -51,10 +51,11 @@ class PracticalANNModel:
         self.input_min = np.array([1, 7.7, -3.5, 0])
         self.input_max = np.array([148, 38.5, 23.5, 59.9])
 
-    def tansig(self, x): 
+    def tansig(self, x):
         return np.tanh(x)
 
     def _clip_inputs(self, X_real):
+        # Evitar extrapolaciones fuera del rango de entrenamiento
         return np.clip(X_real, self.input_min, self.input_max)
 
     def normalize_input(self, X_real):
@@ -62,6 +63,7 @@ class PracticalANNModel:
         return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
 
     def desnormalize_output(self, y_norm, ymin=-1, ymax=1):
+        # tanh ∈ [-1,1] → mapeo lineal a [0,1]
         return (y_norm - ymin) / (ymax - ymin)
 
     def _predict_single(self, x_norm):
@@ -139,10 +141,12 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["Fecha"]).sort_values("Fecha").reset_index(drop=True)
 
+    # Completar faltantes simples (si los hubiera)
     for col in ["TMAX", "TMIN", "Prec"]:
         if df[col].isna().any():
             df[col] = df[col].interpolate(limit_direction="both")
 
+    # Julian_days respecto al inicio de campaña (1/sep/2025 = día 1)
     base = pd.Timestamp("2025-09-01")
     df["Julian_days"] = (df["Fecha"] - base).dt.days + 1
 
