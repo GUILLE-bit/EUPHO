@@ -55,7 +55,6 @@ class PracticalANNModel:
         return np.tanh(x)
 
     def _clip_inputs(self, X_real):
-        # Evitar extrapolaciones fuera del rango de entrenamiento
         return np.clip(X_real, self.input_min, self.input_max)
 
     def normalize_input(self, X_real):
@@ -63,7 +62,6 @@ class PracticalANNModel:
         return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
 
     def desnormalize_output(self, y_norm, ymin=-1, ymax=1):
-        # tanh ∈ [-1,1] → mapeo lineal a [0,1]
         return (y_norm - ymin) / (ymax - ymin)
 
     def _predict_single(self, x_norm):
@@ -210,7 +208,8 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     # Media móvil 5 días (centrada)
     pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1, center=True).mean()
 
-    # ========== ÚNICO recorte de periodo para gráficos + tabla + CSV ==========
+    # ========== RECORTE DURO del período (sep → feb) ==========
+    pred = pred.sort_values("Fecha").reset_index(drop=True)
     mask_periodo = (pred["Fecha"] >= PERIODO_INICIO) & (pred["Fecha"] <= PERIODO_FIN)
     pred_period = pred.loc[mask_periodo].copy()
 
@@ -218,25 +217,34 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"Sin datos entre {PERIODO_INICIO.date()} y {PERIODO_FIN.date()} para {nombre}.")
         return
 
+    # Recalcular acumulados SOLO dentro del período (arranca en 0 en 1/sep)
+    pred_period["EMERREL acumulado"] = pred_period["EMERREL(0-1)"].cumsum()
+    pred_period["EMEAC (0-1) - mínimo"]    = pred_period["EMERREL acumulado"] / EMEAC_MIN_DEN
+    pred_period["EMEAC (0-1) - máximo"]    = pred_period["EMERREL acumulado"] / EMEAC_MAX_DEN
+    pred_period["EMEAC (0-1) - ajustable"] = pred_period["EMERREL acumulado"] / umbral_usuario
+    for col in ["EMEAC (0-1) - mínimo", "EMEAC (0-1) - máximo", "EMEAC (0-1) - ajustable"]:
+        pred_period[col.replace("(0-1)", "(%)")] = (pred_period[col] * 100).clip(0, 100)
+
     # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA =====================
     st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO - NAPOSTA 2025 (1/sep/2025 → 1/feb/2026)")
     colores = pred_period["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
 
     fig_er = go.Figure()
+    x_vals = pred_period["Fecha"]
     fig_er.add_bar(
-        x=pred_period["Fecha"], y=pred_period["EMERREL(0-1)"],
+        x=x_vals, y=pred_period["EMERREL(0-1)"],
         marker=dict(color=colores),
         customdata=pred_period["Nivel_Emergencia_relativa"],
         hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
         name="EMERREL (0-1)"
     )
     fig_er.add_trace(go.Scatter(
-        x=pred_period["Fecha"], y=pred_period["EMERREL_MA5"],
+        x=x_vals, y=pred_period["EMERREL_MA5"],
         mode="lines", name="Media móvil 5 días",
         hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"
     ))
     fig_er.add_trace(go.Scatter(
-        x=pred_period["Fecha"], y=pred_period["EMERREL_MA5"],
+        x=x_vals, y=pred_period["EMERREL_MA5"],
         mode="lines", line=dict(width=0), fill="tozeroy",
         fillcolor="rgba(135, 206, 250, 0.3)",
         hoverinfo="skip", showlegend=False
@@ -245,24 +253,27 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
         hovermode="x unified"
     )
-    fig_er.update_xaxes(range=[PERIODO_INICIO, PERIODO_FIN], dtick="M1", tickformat="%b")
+    fig_er.update_xaxes(
+        range=[PERIODO_INICIO, PERIODO_FIN],
+        dtick="M1",
+        tickformat="%b",
+        fixedrange=True  # evita auto-extendidos
+    )
     st.plotly_chart(fig_er, theme="streamlit", use_container_width=True)
 
     # ===================== Gráfico 2: EMERGENCIA ACUMULADA DIARIA =====================
     st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO - NAPOSTA 2025 (1/sep/2025 → 1/feb/2026)")
     fig = go.Figure()
-    # Banda entre mínimo y máximo
     fig.add_trace(go.Scatter(
-        x=pred_period["Fecha"], y=pred_period["EMEAC (%) - máximo"],
+        x=x_vals, y=pred_period["EMEAC (%) - máximo"],
         mode="lines", line=dict(width=0), name="Máximo"
     ))
     fig.add_trace(go.Scatter(
-        x=pred_period["Fecha"], y=pred_period["EMEAC (%) - mínimo"],
+        x=x_vals, y=pred_period["EMEAC (%) - mínimo"],
         mode="lines", line=dict(width=0), fill="tonexty", name="Mínimo"
     ))
-    # Línea de umbral ajustable
     fig.add_trace(go.Scatter(
-        x=pred_period["Fecha"], y=pred_period["EMEAC (%) - ajustable"],
+        x=x_vals, y=pred_period["EMEAC (%) - ajustable"],
         mode="lines", line=dict(width=2.5), name=f"Ajustable (/{umbral_usuario:.2f})"
     ))
     fig.update_layout(
@@ -270,7 +281,12 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         yaxis=dict(range=[0, 100]),
         hovermode="x unified"
     )
-    fig.update_xaxes(range=[PERIODO_INICIO, PERIODO_FIN], dtick="M1", tickformat="%b")
+    fig.update_xaxes(
+        range=[PERIODO_INICIO, PERIODO_FIN],
+        dtick="M1",
+        tickformat="%b",
+        fixedrange=True  # evita auto-extendidos
+    )
     st.plotly_chart(fig, theme="streamlit", use_container_width=True)
 
     # ===================== Tabla =====================
