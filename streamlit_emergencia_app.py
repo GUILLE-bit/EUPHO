@@ -161,7 +161,7 @@ st.title("Predicción de Emergencia Agrícola EUPHO- NAPOSTA 2025")
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
     "Umbral ajustable de EMEAC para 100%",
-    min_value=10, max_value=15.0, value=15.0, step=0.01, format="%.2f"
+    min_value=10.0, max_value=15.0, value=15.0, step=0.01, format="%.2f"
 )
 
 fuente = st.sidebar.radio(
