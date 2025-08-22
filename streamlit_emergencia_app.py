@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 
-# ================== Configuración visual ==================
+# ================== Configuración visual y constantes ==================
 THR_BAJO_MEDIO = 0.020
 THR_MEDIO_ALTO = 0.079
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
@@ -17,6 +17,10 @@ EMEAC_MIN_DEN = 1.60
 EMEAC_MAX_DEN = 2.10
 
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-np.xml"
+
+# ======= Fechas (incluir hasta 31 de enero) =======
+fecha_inicio = pd.to_datetime("2025-09-01")
+fecha_fin    = pd.to_datetime("2026-01-31")
 
 # ================== Modelo ANN (pesos embebidos) ==================
 class PracticalANNModel:
@@ -42,12 +46,20 @@ class PracticalANNModel:
         ])
         self.bias_out = -5.394722
         # IMPORTANTE: orden de entrada = [Julian_days, TMAX, TMIN, Prec]
-        self.input_min = np.array([1, 7.7, -3.5, 0])
-        self.input_max = np.array([148, 38.5, 23.5, 59.9])
+        self.input_min = np.array([1.0, 7.7, -3.5, 0.0])
+        self.input_max = np.array([148.0, 38.5, 23.5, 59.9])  # rango de entrenamiento
+        # Si se prefiere adaptar a la campaña: self.input_max[0] = 182  (pero se recomienda clipping)
 
-    def tansig(self, x): return np.tanh(x)
-    def normalize_input(self, X_real): return 2 * (X_real - self.input_min) / (self.input_max - self.input_min) - 1
-    def desnormalize_output(self, y_norm, ymin=-1, ymax=1): return (y_norm - ymin) / (ymax - ymin)
+    def tansig(self, x): 
+        return np.tanh(x)
+
+    def normalize_input(self, X_real):
+        # Clipping para evitar valores fuera del rango de entrenamiento
+        Xc = np.clip(X_real, self.input_min, self.input_max)
+        return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
+
+    def desnormalize_output(self, y_norm, ymin=-1, ymax=1):
+        return (y_norm - ymin) / (ymax - ymin)
 
     def _predict_single(self, x_norm):
         z1 = self.IW.T @ x_norm + self.bias_IW
@@ -76,11 +88,13 @@ class PracticalANNModel:
         return pd.DataFrame({"EMERREL(0-1)": emerrel_diff, "Nivel_Emergencia_relativa": riesgo})
 
 # ================== Helpers API MeteoBahia ==================
+@st.cache_data(ttl=15*60, show_spinner=False)
 def _fetch_xml(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Streamlit MeteoBahia)"})
     with urlopen(req, timeout=20) as r:
         return r.read()
 
+@st.cache_data(ttl=15*60, show_spinner=False)
 def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
     """
     Parser específico para el XML de MeteoBahia (for-np.xml).
@@ -129,10 +143,13 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["Fecha"]).sort_values("Fecha").reset_index(drop=True)
 
-    # Completar faltantes simples (si los hubiera)
+    # Coerción numérica + completar faltantes
     for col in ["TMAX", "TMIN", "Prec"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
         if df[col].isna().any():
             df[col] = df[col].interpolate(limit_direction="both")
+    # No permitir precipitación negativa
+    df["Prec"] = df["Prec"].clip(lower=0)
 
     # Julian_days respecto al inicio de campaña (1/sep/2025 = día 1)
     base = pd.Timestamp("2025-09-01")
@@ -162,11 +179,11 @@ if fuente == "Subir Excel (.xlsx)":
         type=["xlsx"], accept_multiple_files=True
     )
 
-modelo = PracticalANNModel()
+@st.cache_resource
+def get_model():
+    return PracticalANNModel()
 
-# Rango de fechas de visualización (campaña primavera-verano hasta 1/mar)
-fecha_inicio = pd.to_datetime("2025-09-01")
-fecha_fin = pd.to_datetime("2026-03-01")
+modelo = get_model()
 
 def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     req = {"Julian_days", "TMAX", "TMIN", "Prec", "Fecha"}
@@ -174,13 +191,31 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"{nombre}: faltan columnas requeridas {sorted(list(req - set(df.columns)))}")
         return
 
+    # --- Recortar a la ventana ANTES de predecir y acumular ---
+    df["Fecha"] = pd.to_datetime(df["Fecha"])
+    m_win = (df["Fecha"] >= fecha_inicio) & (df["Fecha"] <= fecha_fin)
+    df_win = df.loc[m_win].copy().reset_index(drop=True)
+    if df_win.empty:
+        st.warning(f"Sin datos entre {fecha_inicio.date()} y {fecha_fin.date()} para {nombre}.")
+        return
+
+    # Sanitizar tipos numéricos por seguridad
+    for col in ["Julian_days", "TMAX", "TMIN", "Prec"]:
+        df_win[col] = pd.to_numeric(df_win[col], errors="coerce")
+    if df_win[["Julian_days", "TMAX", "TMIN", "Prec"]].isna().any().any():
+        df_win[["TMAX", "TMIN", "Prec"]] = df_win[["TMAX", "TMIN", "Prec"]].interpolate(limit_direction="both")
+        df_win["Prec"] = df_win["Prec"].fillna(0).clip(lower=0)
+        df_win["Julian_days"] = df_win["Julian_days"].interpolate(limit_direction="both")
+
     # Entradas al modelo (orden must: [Julian_days, TMAX, TMIN, Prec])
-    X_real = df[["Julian_days", "TMAX", "TMIN", "Prec"]].to_numpy()
-    fechas = pd.to_datetime(df["Fecha"])
+    X_real = df_win[["Julian_days", "TMAX", "TMIN", "Prec"]].to_numpy()
+    fechas = pd.to_datetime(df_win["Fecha"])
 
     pred = modelo.predict(X_real)
     pred["Fecha"] = fechas
-    pred["Julian_days"] = df["Julian_days"]
+    pred["Julian_days"] = df_win["Julian_days"]
+
+    # EMERREL acumulado SOLO dentro de la ventana (se corta al 31/ene)
     pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
 
     # EMEAC con tres denominadores: min, max (banda), ajustable (usuario)
@@ -193,12 +228,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     # Media móvil 5 días
     pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
 
-    # Rango visible
-    m = (pred["Fecha"] >= fecha_inicio) & (pred["Fecha"] <= fecha_fin)
-    pred_vis = pred.loc[m].copy()
-    if pred_vis.empty:
-        st.warning(f"Sin datos entre {fecha_inicio.date()} y {fecha_fin.date()} para {nombre}.")
-        return
+    pred_vis = pred
 
     # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA =====================
     st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO- NAPOSTA 2025")
@@ -226,10 +256,10 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     fig_er.update_layout(
         xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
         hovermode="x unified",
-        height=650, width=1600
+        height=650
     )
     fig_er.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
-    st.plotly_chart(fig_er, theme="streamlit")
+    st.plotly_chart(fig_er, theme="streamlit", use_container_width=True)
 
     # ===================== Gráfico 2: EMERGENCIA ACUMULADA DIARIA =====================
     st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO- NAPOSTA 2025")
@@ -237,11 +267,11 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     # Banda entre mínimo y máximo
     fig.add_trace(go.Scatter(
         x=pred_vis["Fecha"], y=pred_vis["EMEAC (%) - máximo"],
-        mode="lines", line=dict(width=0), name="Máximo"
+        mode="lines", line=dict(width=0), name="Banda EMEAC (máx)"
     ))
     fig.add_trace(go.Scatter(
         x=pred_vis["Fecha"], y=pred_vis["EMEAC (%) - mínimo"],
-        mode="lines", line=dict(width=0), fill="tonexty", name="Mínimo"
+        mode="lines", line=dict(width=0), fill="tonexty", name="Banda EMEAC (mín)"
     ))
     # Línea de umbral ajustable
     fig.add_trace(go.Scatter(
@@ -252,13 +282,13 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         xaxis_title="Fecha", yaxis_title="EMEAC (%)",
         yaxis=dict(range=[0, 100]),
         hovermode="x unified",
-        height=600, width=1600
+        height=600
     )
     fig.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
-    st.plotly_chart(fig, theme="streamlit")
+    st.plotly_chart(fig, theme="streamlit", use_container_width=True)
 
     # ===================== Tabla =====================
-    st.subheader(f"Resultados (sep → mar) - {nombre}")
+    st.subheader(f"Resultados (sep → ene) - {nombre}")
     nivel_icono = {"Bajo": "🟢 Bajo", "Medio": "🟠 Medio", "Alto": "🔴 Alto"}
     tabla = pred_vis[["Fecha", "Julian_days", "Nivel_Emergencia_relativa"]].copy()
     tabla["EMEAC (%)"] = pred_vis["EMEAC (%) - ajustable"]
@@ -280,7 +310,7 @@ if fuente == "Subir Excel (.xlsx)":
             # Si no trae 'Fecha', la derivamos desde la campaña (1/sep/2025 = día 1)
             if "Fecha" not in df.columns and "Julian_days" in df.columns:
                 base = pd.Timestamp("2025-09-01")
-                df["Fecha"] = base + pd.to_timedelta(df["Julian_days"] - 1, unit="D")
+                df["Fecha"] = base + pd.to_timedelta(pd.to_numeric(df["Julian_days"], errors="coerce") - 1, unit="D")
             procesar_y_mostrar(df, nombre=Path(file.name).stem)
     else:
         st.info("Sube al menos un archivo .xlsx para iniciar el análisis.")
