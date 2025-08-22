@@ -6,25 +6,19 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 
-# ================== Config general ==================
-st.set_page_config(page_title="Predicción EUPHO - Napostá 2025", layout="wide")
-
+# ================== Configuración visual ==================
 THR_BAJO_MEDIO = 0.020
 THR_MEDIO_ALTO = 0.079
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
 COLOR_FALLBACK = "#808080"
 
+# Denominadores de EMEAC (mín / máx de banda; ajustable = input usuario)
 EMEAC_MIN_DEN = 1.60
 EMEAC_MAX_DEN = 2.10
 
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-np.xml"
 
-# ================== Período campaña ==================
-PERIODO_INICIO = pd.to_datetime("2025-09-01")
-PERIODO_FIN    = pd.to_datetime("2026-02-01")  # inclusivo
-PERIODO_FIN_EXCL = PERIODO_FIN + pd.Timedelta(days=1)
-
-# ================== Modelo ANN ==================
+# ================== Modelo ANN (pesos embebidos) ==================
 class PracticalANNModel:
     def __init__(self):
         self.IW = np.array([
@@ -47,15 +41,13 @@ class PracticalANNModel:
             2.703778, 4.776029
         ])
         self.bias_out = -5.394722
+        # IMPORTANTE: orden de entrada = [Julian_days, TMAX, TMIN, Prec]
         self.input_min = np.array([1, 7.7, -3.5, 0])
         self.input_max = np.array([148, 38.5, 23.5, 59.9])
 
     def tansig(self, x): return np.tanh(x)
-    def _clip_inputs(self, X): return np.clip(X, self.input_min, self.input_max)
-    def normalize_input(self, X):
-        Xc = self._clip_inputs(X)
-        return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
-    def desnormalize_output(self, y, ymin=-1, ymax=1): return (y - ymin) / (ymax - ymin)
+    def normalize_input(self, X_real): return 2 * (X_real - self.input_min) / (self.input_max - self.input_min) - 1
+    def desnormalize_output(self, y_norm, ymin=-1, ymax=1): return (y_norm - ymin) / (ymax - ymin)
 
     def _predict_single(self, x_norm):
         z1 = self.IW.T @ x_norm + self.bias_IW
@@ -64,46 +56,72 @@ class PracticalANNModel:
         return self.tansig(z2)
 
     def predict(self, X_real):
-        Xn = self.normalize_input(X_real)
-        y = np.array([self._predict_single(x) for x in Xn])
-        emerrel = self.desnormalize_output(y)  # diaria [0,1]
-        return pd.DataFrame({"EMERREL(0-1)": emerrel})
+        X_norm = self.normalize_input(X_real)
+        emerrel_pred = np.array([self._predict_single(x) for x in X_norm])
+        emerrel_desnorm = self.desnormalize_output(emerrel_pred)
+        emerrel_cumsum = np.cumsum(emerrel_desnorm)
+        valor_max_emeac = 8.05
+        emer_ac = emerrel_cumsum / valor_max_emeac
+        emerrel_diff = np.diff(emer_ac, prepend=0)
 
-# ================== Helpers API ==================
+        def clasificar(v):
+            if v < THR_BAJO_MEDIO:
+                return "Bajo"
+            elif v <= THR_MEDIO_ALTO:
+                return "Medio"
+            else:
+                return "Alto"
+
+        riesgo = np.array([clasificar(v) for v in emerrel_diff])
+        return pd.DataFrame({"EMERREL(0-1)": emerrel_diff, "Nivel_Emergencia_relativa": riesgo})
+
+# ================== Helpers API MeteoBahia ==================
 def _fetch_xml(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Streamlit MeteoBahia)"})
     with urlopen(req, timeout=20) as r:
         return r.read()
 
-def _get_attr_or_text(tag):
-    if tag is None: return ""
-    v = tag.attrib.get("value")
-    if v is None: v = tag.text
-    return (v or "").strip()
-
 def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
+    """
+    Parser específico para el XML de MeteoBahia (for-np.xml).
+    Extrae: Fecha, TMAX, TMIN, Prec (desde tags con atributo value).
+    """
     root = ET.fromstring(xml_bytes)
     rows = []
     for day in root.findall(".//day"):
-        fecha_raw  = _get_attr_or_text(day.find("fecha"))
-        tmax_raw   = _get_attr_or_text(day.find("tmax"))
-        tmin_raw   = _get_attr_or_text(day.find("tmin"))
-        precip_raw = _get_attr_or_text(day.find("precip"))
+        fecha_tag  = day.find("fecha")
+        tmax_tag   = day.find("tmax")
+        tmin_tag   = day.find("tmin")
+        precip_tag = day.find("precip")
 
-        fecha = pd.to_datetime(fecha_raw, errors="coerce")
-        if pd.isna(fecha): 
+        if fecha_tag is None or "value" not in (fecha_tag.attrib or {}):
             continue
 
-        def to_float(s, default=None):
-            s = str(s).replace(",", ".")
-            try: return float(s)
-            except: return default
+        fecha_str = str(fecha_tag.attrib.get("value", "")).strip()
+        fecha = pd.to_datetime(fecha_str, errors="coerce")
+        if pd.isna(fecha):
+            continue
+
+        def _to_float_attr(tag):
+            if tag is None:
+                return None
+            s = str(tag.attrib.get("value", "")).strip().replace(",", ".")
+            try:
+                return float(s)
+            except:
+                return None
+
+        tmax = _to_float_attr(tmax_tag)
+        tmin = _to_float_attr(tmin_tag)
+        prec = _to_float_attr(precip_tag)
+        if prec is None:
+            prec = 0.0
 
         rows.append({
             "Fecha": fecha.normalize(),
-            "TMAX": to_float(tmax_raw, default=np.nan),
-            "TMIN": to_float(tmin_raw, default=np.nan),
-            "Prec": to_float(precip_raw, default=0.0)
+            "TMAX": tmax,
+            "TMIN": tmin,
+            "Prec": prec
         })
 
     if not rows:
@@ -111,27 +129,19 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["Fecha"]).sort_values("Fecha").reset_index(drop=True)
 
+    # Completar faltantes simples (si los hubiera)
     for col in ["TMAX", "TMIN", "Prec"]:
         if df[col].isna().any():
             df[col] = df[col].interpolate(limit_direction="both")
 
+    # Julian_days respecto al inicio de campaña (1/sep/2025 = día 1)
     base = pd.Timestamp("2025-09-01")
     df["Julian_days"] = (df["Fecha"] - base).dt.days + 1
+
     return df[["Fecha", "Julian_days", "TMAX", "TMIN", "Prec"]]
 
-# ================== Cache ==================
-@st.cache_resource
-def get_model():
-    return PracticalANNModel()
-
-@st.cache_data(ttl=30*60)
-def cached_fetch_xml(url: str) -> bytes:
-    return _fetch_xml(url)
-
-modelo = get_model()
-
-# ================== UI ==================
-st.title("Predicción de Emergencia Agrícola EUPHO - NAPOSTA 2025")
+# ================== App ==================
+st.title("Predicción de Emergencia Agrícola EUPHO- NAPOSTA 2025")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
@@ -152,10 +162,11 @@ if fuente == "Subir Excel (.xlsx)":
         type=["xlsx"], accept_multiple_files=True
     )
 
-def _nivel(v: float) -> str:
-    if v < THR_BAJO_MEDIO: return "Bajo"
-    if v <= THR_MEDIO_ALTO: return "Medio"
-    return "Alto"
+modelo = PracticalANNModel()
+
+# Rango de fechas de visualización (campaña primavera-verano hasta 1/mar)
+fecha_inicio = pd.to_datetime("2025-09-01")
+fecha_fin = pd.to_datetime("2026-03-01")
 
 def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     req = {"Julian_days", "TMAX", "TMIN", "Prec", "Fecha"}
@@ -163,100 +174,101 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"{nombre}: faltan columnas requeridas {sorted(list(req - set(df.columns)))}")
         return
 
-    df = df.copy()
-    df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.normalize()
-
-    # ======= CORTE ANTES DE PREDICCION: el modelo se detiene el 1/feb =======
-    df = df[(df["Fecha"] >= PERIODO_INICIO) & (df["Fecha"] <= PERIODO_FIN)]
-    df = df.sort_values("Fecha").reset_index(drop=True)
-    if df.empty:
-        st.warning(f"Sin datos entre {PERIODO_INICIO.date()} y {PERIODO_FIN.date()} para {nombre}.")
-        return
-
+    # Entradas al modelo (orden must: [Julian_days, TMAX, TMIN, Prec])
     X_real = df[["Julian_days", "TMAX", "TMIN", "Prec"]].to_numpy()
+    fechas = pd.to_datetime(df["Fecha"])
+
     pred = modelo.predict(X_real)
-
-    # Unir datos del período
-    pred["Fecha"] = df["Fecha"].values
-    pred["Julian_days"] = df["Julian_days"].values
-
-    # MA5 centrada
-    pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1, center=True).mean()
-
-    # ======= CORTE FINAL DURO Y RECALCULO TRAS CORTE =======
-    pred = pred.loc[pred["Fecha"] <= PERIODO_FIN].copy()
-    pred["EMERREL_MA5"] = pred["EMERREL_MA5"].where(pred["Fecha"] <= PERIODO_FIN)
-
-    # Clasificación y acumulados SOLO dentro del período (reinicia 1/sep)
-    pred["Nivel_Emergencia_relativa"] = pred["EMERREL(0-1)"].apply(_nivel)
+    pred["Fecha"] = fechas
+    pred["Julian_days"] = df["Julian_days"]
     pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
+
+    # EMEAC con tres denominadores: min, max (banda), ajustable (usuario)
     pred["EMEAC (0-1) - mínimo"]    = pred["EMERREL acumulado"] / EMEAC_MIN_DEN
     pred["EMEAC (0-1) - máximo"]    = pred["EMERREL acumulado"] / EMEAC_MAX_DEN
     pred["EMEAC (0-1) - ajustable"] = pred["EMERREL acumulado"] / umbral_usuario
     for col in ["EMEAC (0-1) - mínimo", "EMEAC (0-1) - máximo", "EMEAC (0-1) - ajustable"]:
         pred[col.replace("(0-1)", "(%)")] = (pred[col] * 100).clip(0, 100)
 
-    # Rango x dinámico: hasta último dato válido (evita mostrar marzo vacío)
-    x_min, x_max = pred["Fecha"].min(), pred["Fecha"].max()
+    # Media móvil 5 días
+    pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
 
-    # ===================== Gráfico 1: EMERGENCIA RELATIVA =====================
-    st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO - NAPOSTA 2025 (1/sep/2025 → 1/feb/2026)")
-    colores = pred["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
+    # Rango visible
+    m = (pred["Fecha"] >= fecha_inicio) & (pred["Fecha"] <= fecha_fin)
+    pred_vis = pred.loc[m].copy()
+    if pred_vis.empty:
+        st.warning(f"Sin datos entre {fecha_inicio.date()} y {fecha_fin.date()} para {nombre}.")
+        return
+
+    # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA =====================
+    st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO- NAPOSTA 2025")
+    colores = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
 
     fig_er = go.Figure()
-    x_vals = pred["Fecha"]
     fig_er.add_bar(
-        x=x_vals, y=pred["EMERREL(0-1)"],
+        x=pred_vis["Fecha"], y=pred_vis["EMERREL(0-1)"],
         marker=dict(color=colores),
-        customdata=pred["Nivel_Emergencia_relativa"],
+        customdata=pred_vis["Nivel_Emergencia_relativa"],
         hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
         name="EMERREL (0-1)"
     )
     fig_er.add_trace(go.Scatter(
-        x=x_vals, y=pred["EMERREL_MA5"],
+        x=pred_vis["Fecha"], y=pred_vis["EMERREL_MA5"],
         mode="lines", name="Media móvil 5 días",
         hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"
     ))
     fig_er.add_trace(go.Scatter(
-        x=x_vals, y=pred["EMERREL_MA5"],
+        x=pred_vis["Fecha"], y=pred_vis["EMERREL_MA5"],
         mode="lines", line=dict(width=0), fill="tozeroy",
         fillcolor="rgba(135, 206, 250, 0.3)",
         hoverinfo="skip", showlegend=False
     ))
-    fig_er.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)", hovermode="x unified")
-    fig_er.update_xaxes(range=[x_min, x_max], dtick="M1", tickformat="%b", fixedrange=True)
-    st.plotly_chart(fig_er, theme="streamlit", use_container_width=True)
+    fig_er.update_layout(
+        xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
+        hovermode="x unified",
+        height=650, width=1600
+    )
+    fig_er.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
+    st.plotly_chart(fig_er, theme="streamlit")
 
-    # ===================== Gráfico 2: EMERGENCIA ACUMULADA =====================
-    st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO - NAPOSTA 2025 (1/sep/2025 → 1/feb/2026)")
+    # ===================== Gráfico 2: EMERGENCIA ACUMULADA DIARIA =====================
+    st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO- NAPOSTA 2025")
     fig = go.Figure()
+    # Banda entre mínimo y máximo
     fig.add_trace(go.Scatter(
-        x=x_vals, y=pred["EMEAC (%) - máximo"],
+        x=pred_vis["Fecha"], y=pred_vis["EMEAC (%) - máximo"],
         mode="lines", line=dict(width=0), name="Máximo"
     ))
     fig.add_trace(go.Scatter(
-        x=x_vals, y=pred["EMEAC (%) - mínimo"],
+        x=pred_vis["Fecha"], y=pred_vis["EMEAC (%) - mínimo"],
         mode="lines", line=dict(width=0), fill="tonexty", name="Mínimo"
     ))
+    # Línea de umbral ajustable
     fig.add_trace(go.Scatter(
-        x=x_vals, y=pred["EMEAC (%) - ajustable"],
+        x=pred_vis["Fecha"], y=pred_vis["EMEAC (%) - ajustable"],
         mode="lines", line=dict(width=2.5), name=f"Ajustable (/{umbral_usuario:.2f})"
     ))
-    fig.update_layout(xaxis_title="Fecha", yaxis_title="EMEAC (%)", yaxis=dict(range=[0, 100]), hovermode="x unified")
-    fig.update_xaxes(range=[x_min, x_max], dtick="M1", tickformat="%b", fixedrange=True)
-    st.plotly_chart(fig, theme="streamlit", use_container_width=True)
+    fig.update_layout(
+        xaxis_title="Fecha", yaxis_title="EMEAC (%)",
+        yaxis=dict(range=[0, 100]),
+        hovermode="x unified",
+        height=600, width=1600
+    )
+    fig.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
+    st.plotly_chart(fig, theme="streamlit")
 
     # ===================== Tabla =====================
-    st.subheader(f"Resultados (1/sep/2025 → 1/feb/2026) - {nombre}")
+    st.subheader(f"Resultados (sep → mar) - {nombre}")
     nivel_icono = {"Bajo": "🟢 Bajo", "Medio": "🟠 Medio", "Alto": "🔴 Alto"}
-    tabla = pred[["Fecha", "Julian_days"]].copy()
-    tabla["Nivel de EMERREL"] = pred["Nivel_Emergencia_relativa"].map(nivel_icono)
-    tabla["EMEAC (%)"] = pred["EMEAC (%) - ajustable"].round(1)
+    tabla = pred_vis[["Fecha", "Julian_days", "Nivel_Emergencia_relativa"]].copy()
+    tabla["EMEAC (%)"] = pred_vis["EMEAC (%) - ajustable"]
+    tabla["Nivel_Emergencia_relativa"] = tabla["Nivel_Emergencia_relativa"].map(nivel_icono)
+    tabla = tabla.rename(columns={"Nivel_Emergencia_relativa": "Nivel de EMERREL"})
     st.dataframe(tabla, use_container_width=True)
     st.download_button(
-        "Descargar CSV (sep→feb)",
+        "Descargar CSV",
         tabla.to_csv(index=False).encode("utf-8"),
-        f"{nombre}_resultados_sep_feb.csv",
+        f"{nombre}_resultados.csv",
         "text/csv"
     )
 
@@ -265,6 +277,7 @@ if fuente == "Subir Excel (.xlsx)":
     if uploaded_files:
         for file in uploaded_files:
             df = pd.read_excel(file)
+            # Si no trae 'Fecha', la derivamos desde la campaña (1/sep/2025 = día 1)
             if "Fecha" not in df.columns and "Julian_days" in df.columns:
                 base = pd.Timestamp("2025-09-01")
                 df["Fecha"] = base + pd.to_timedelta(df["Julian_days"] - 1, unit="D")
@@ -272,11 +285,11 @@ if fuente == "Subir Excel (.xlsx)":
     else:
         st.info("Sube al menos un archivo .xlsx para iniciar el análisis.")
 else:
+    # API MeteoBahia
     try:
-        xml_bytes = cached_fetch_xml(API_URL)
+        xml_bytes = _fetch_xml(API_URL)
         df_api = parse_meteobahia_xml(xml_bytes)
-        st.success(f"API MeteoBahia cargada: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} días")
+        st.success(f"API MeteoBahia: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} días")
         procesar_y_mostrar(df_api, nombre="MeteoBahia_API")
     except Exception as e:
         st.error(f"No se pudo leer la API MeteoBahia: {e}")
-
