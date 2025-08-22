@@ -6,7 +6,9 @@ import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 
-# ================== Configuración visual ==================
+# ================== Configuración general ==================
+st.set_page_config(page_title="Predicción EUPHO - Napostá 2025", layout="wide")
+
 THR_BAJO_MEDIO = 0.020
 THR_MEDIO_ALTO = 0.079
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
@@ -45,9 +47,20 @@ class PracticalANNModel:
         self.input_min = np.array([1, 7.7, -3.5, 0])
         self.input_max = np.array([148, 38.5, 23.5, 59.9])
 
-    def tansig(self, x): return np.tanh(x)
-    def normalize_input(self, X_real): return 2 * (X_real - self.input_min) / (self.input_max - self.input_min) - 1
-    def desnormalize_output(self, y_norm, ymin=-1, ymax=1): return (y_norm - ymin) / (ymax - ymin)
+    def tansig(self, x): 
+        return np.tanh(x)
+
+    def _clip_inputs(self, X_real):
+        # Evitar extrapolaciones fuera del rango de entrenamiento
+        return np.clip(X_real, self.input_min, self.input_max)
+
+    def normalize_input(self, X_real):
+        Xc = self._clip_inputs(X_real)
+        return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
+
+    def desnormalize_output(self, y_norm, ymin=-1, ymax=1):
+        # tanh ∈ [-1,1] → mapeo lineal a [0,1]
+        return (y_norm - ymin) / (ymax - ymin)
 
     def _predict_single(self, x_norm):
         z1 = self.IW.T @ x_norm + self.bias_IW
@@ -81,48 +94,43 @@ def _fetch_xml(url: str) -> bytes:
     with urlopen(req, timeout=20) as r:
         return r.read()
 
+def _get_attr_or_text(tag):
+    if tag is None:
+        return ""
+    v = tag.attrib.get("value")
+    if v is None:
+        v = tag.text
+    return (v or "").strip()
+
 def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
     """
     Parser específico para el XML de MeteoBahia (for-np.xml).
-    Extrae: Fecha, TMAX, TMIN, Prec (desde tags con atributo value).
+    Extrae: Fecha, TMAX, TMIN, Prec (desde atributo value o texto).
     """
     root = ET.fromstring(xml_bytes)
     rows = []
     for day in root.findall(".//day"):
-        fecha_tag  = day.find("fecha")
-        tmax_tag   = day.find("tmax")
-        tmin_tag   = day.find("tmin")
-        precip_tag = day.find("precip")
+        fecha_raw  = _get_attr_or_text(day.find("fecha"))
+        tmax_raw   = _get_attr_or_text(day.find("tmax"))
+        tmin_raw   = _get_attr_or_text(day.find("tmin"))
+        precip_raw = _get_attr_or_text(day.find("precip"))
 
-        if fecha_tag is None or "value" not in (fecha_tag.attrib or {}):
-            continue
-
-        fecha_str = str(fecha_tag.attrib.get("value", "")).strip()
-        fecha = pd.to_datetime(fecha_str, errors="coerce")
+        fecha = pd.to_datetime(fecha_raw, errors="coerce")
         if pd.isna(fecha):
             continue
 
-        def _to_float_attr(tag):
-            if tag is None:
-                return None
-            s = str(tag.attrib.get("value", "")).strip().replace(",", ".")
+        def to_float(s, default=None):
+            s = str(s).replace(",", ".")
             try:
                 return float(s)
             except:
-                return None
+                return default
 
-        tmax = _to_float_attr(tmax_tag)
-        tmin = _to_float_attr(tmin_tag)
-        prec = _to_float_attr(precip_tag)
-        if prec is None:
-            prec = 0.0
+        tmax = to_float(tmax_raw, default=np.nan)
+        tmin = to_float(tmin_raw, default=np.nan)
+        prec = to_float(precip_raw, default=0.0)
 
-        rows.append({
-            "Fecha": fecha.normalize(),
-            "TMAX": tmax,
-            "TMIN": tmin,
-            "Prec": prec
-        })
+        rows.append({"Fecha": fecha.normalize(), "TMAX": tmax, "TMIN": tmin, "Prec": prec})
 
     if not rows:
         raise ValueError("No se encontraron elementos <day> con datos válidos en el XML.")
@@ -140,8 +148,19 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
 
     return df[["Fecha", "Julian_days", "TMAX", "TMIN", "Prec"]]
 
-# ================== App ==================
-st.title("Predicción de Emergencia Agrícola EUPHO- NAPOSTA 2025")
+# ================== Cache ==================
+@st.cache_resource
+def get_model():
+    return PracticalANNModel()
+
+@st.cache_data(ttl=30*60)  # 30 minutos
+def cached_fetch_xml(url: str) -> bytes:
+    return _fetch_xml(url)
+
+modelo = get_model()
+
+# ================== UI ==================
+st.title("Predicción de Emergencia Agrícola EUPHO - NAPOSTA 2025")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
@@ -162,11 +181,9 @@ if fuente == "Subir Excel (.xlsx)":
         type=["xlsx"], accept_multiple_files=True
     )
 
-modelo = PracticalANNModel()
-
-# Rango de fechas de visualización (campaña primavera-verano hasta 1/mar)
+# Rango de fechas de visualización (campaña PRIMAVERA-VERANO: 1/sep → 1/feb)
 fecha_inicio = pd.to_datetime("2025-09-01")
-fecha_fin = pd.to_datetime("2026-03-01")
+fecha_fin    = pd.to_datetime("2026-02-01")
 
 def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     req = {"Julian_days", "TMAX", "TMIN", "Prec", "Fecha"}
@@ -190,10 +207,10 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     for col in ["EMEAC (0-1) - mínimo", "EMEAC (0-1) - máximo", "EMEAC (0-1) - ajustable"]:
         pred[col.replace("(0-1)", "(%)")] = (pred[col] * 100).clip(0, 100)
 
-    # Media móvil 5 días
-    pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
+    # Media móvil 5 días (centrada)
+    pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1, center=True).mean()
 
-    # Rango visible
+    # Rango visible: 1/sep/2025 a 1/feb/2026
     m = (pred["Fecha"] >= fecha_inicio) & (pred["Fecha"] <= fecha_fin)
     pred_vis = pred.loc[m].copy()
     if pred_vis.empty:
@@ -201,7 +218,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         return
 
     # ===================== Gráfico 1: EMERGENCIA RELATIVA DIARIA =====================
-    st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO- NAPOSTA 2025")
+    st.subheader("EMERGENCIA RELATIVA DIARIA - EUPHO - NAPOSTA 2025")
     colores = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
 
     fig_er = go.Figure()
@@ -217,6 +234,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         mode="lines", name="Media móvil 5 días",
         hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"
     ))
+    # Área bajo la MA5
     fig_er.add_trace(go.Scatter(
         x=pred_vis["Fecha"], y=pred_vis["EMERREL_MA5"],
         mode="lines", line=dict(width=0), fill="tozeroy",
@@ -225,14 +243,13 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     ))
     fig_er.update_layout(
         xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
-        hovermode="x unified",
-        height=650, width=1600
+        hovermode="x unified"
     )
     fig_er.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
-    st.plotly_chart(fig_er, theme="streamlit")
+    st.plotly_chart(fig_er, theme="streamlit", use_container_width=True)
 
     # ===================== Gráfico 2: EMERGENCIA ACUMULADA DIARIA =====================
-    st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO- NAPOSTA 2025")
+    st.subheader("EMERGENCIA ACUMULADA DIARIA - EUPHO - NAPOSTA 2025")
     fig = go.Figure()
     # Banda entre mínimo y máximo
     fig.add_trace(go.Scatter(
@@ -251,17 +268,16 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     fig.update_layout(
         xaxis_title="Fecha", yaxis_title="EMEAC (%)",
         yaxis=dict(range=[0, 100]),
-        hovermode="x unified",
-        height=600, width=1600
+        hovermode="x unified"
     )
     fig.update_xaxes(range=[fecha_inicio, fecha_fin], dtick="M1", tickformat="%b")
-    st.plotly_chart(fig, theme="streamlit")
+    st.plotly_chart(fig, theme="streamlit", use_container_width=True)
 
     # ===================== Tabla =====================
-    st.subheader(f"Resultados (sep → mar) - {nombre}")
+    st.subheader(f"Resultados (sep → feb) - {nombre}")
     nivel_icono = {"Bajo": "🟢 Bajo", "Medio": "🟠 Medio", "Alto": "🔴 Alto"}
     tabla = pred_vis[["Fecha", "Julian_days", "Nivel_Emergencia_relativa"]].copy()
-    tabla["EMEAC (%)"] = pred_vis["EMEAC (%) - ajustable"]
+    tabla["EMEAC (%)"] = pred_vis["EMEAC (%) - ajustable"].round(1)
     tabla["Nivel_Emergencia_relativa"] = tabla["Nivel_Emergencia_relativa"].map(nivel_icono)
     tabla = tabla.rename(columns={"Nivel_Emergencia_relativa": "Nivel de EMERREL"})
     st.dataframe(tabla, use_container_width=True)
@@ -287,7 +303,7 @@ if fuente == "Subir Excel (.xlsx)":
 else:
     # API MeteoBahia
     try:
-        xml_bytes = _fetch_xml(API_URL)
+        xml_bytes = cached_fetch_xml(API_URL)
         df_api = parse_meteobahia_xml(xml_bytes)
         st.success(f"API MeteoBahia: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} días")
         procesar_y_mostrar(df_api, nombre="MeteoBahia_API")
