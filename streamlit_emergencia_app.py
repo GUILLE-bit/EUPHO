@@ -14,18 +14,17 @@ THR_MEDIO_ALTO = 0.079
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
 COLOR_FALLBACK = "#808080"
 
-# Denominadores de EMEAC (mín / máx de banda; ajustable = input usuario)
 EMEAC_MIN_DEN = 1.60
 EMEAC_MAX_DEN = 2.10
 
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-np.xml"
 
-# ================== Período fijo de campaña ==================
-# Campaña: 01/09/2025 (incl.) → 01/02/2026 (incl.)
+# ================== Período de campaña (fijo) ==================
 PERIODO_INICIO = pd.to_datetime("2025-09-01")
-PERIODO_FIN    = pd.to_datetime("2026-02-01")
+PERIODO_FIN    = pd.to_datetime("2026-02-01")  # inclusivo
+PERIODO_FIN_EXCL = PERIODO_FIN + pd.Timedelta(days=1)  # exclusivo (para máscaras estrictas)
 
-# ================== Modelo ANN (pesos embebidos) ==================
+# ================== Modelo ANN ==================
 class PracticalANNModel:
     def __init__(self):
         self.IW = np.array([
@@ -48,24 +47,15 @@ class PracticalANNModel:
             2.703778, 4.776029
         ])
         self.bias_out = -5.394722
-        # Orden de entrada = [Julian_days, TMAX, TMIN, Prec]
         self.input_min = np.array([1, 7.7, -3.5, 0])
         self.input_max = np.array([148, 38.5, 23.5, 59.9])
 
-    def tansig(self, x): 
-        return np.tanh(x)
-
-    def _clip_inputs(self, X_real):
-        # Evitar extrapolar fuera del rango de entrenamiento
-        return np.clip(X_real, self.input_min, self.input_max)
-
-    def normalize_input(self, X_real):
-        Xc = self._clip_inputs(X_real)
+    def tansig(self, x): return np.tanh(x)
+    def _clip_inputs(self, X): return np.clip(X, self.input_min, self.input_max)
+    def normalize_input(self, X): 
+        Xc = self._clip_inputs(X)
         return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
-
-    def desnormalize_output(self, y_norm, ymin=-1, ymax=1):
-        # tanh ∈ [-1,1] → [0,1]
-        return (y_norm - ymin) / (ymax - ymin)
+    def desnormalize_output(self, y, ymin=-1, ymax=1): return (y - ymin) / (ymax - ymin)
 
     def _predict_single(self, x_norm):
         z1 = self.IW.T @ x_norm + self.bias_IW
@@ -74,30 +64,24 @@ class PracticalANNModel:
         return self.tansig(z2)
 
     def predict(self, X_real):
-        X_norm = self.normalize_input(X_real)
-        emerrel_pred = np.array([self._predict_single(x) for x in X_norm])
-        emerrel = self.desnormalize_output(emerrel_pred)  # diaria en [0,1]
+        Xn = self.normalize_input(X_real)
+        y = np.array([self._predict_single(x) for x in Xn])
+        emerrel = self.desnormalize_output(y)  # diaria [0,1]
         return pd.DataFrame({"EMERREL(0-1)": emerrel})
 
-# ================== Helpers API MeteoBahia ==================
+# ================== Helpers API ==================
 def _fetch_xml(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Streamlit MeteoBahia)"})
     with urlopen(req, timeout=20) as r:
         return r.read()
 
 def _get_attr_or_text(tag):
-    if tag is None:
-        return ""
+    if tag is None: return ""
     v = tag.attrib.get("value")
-    if v is None:
-        v = tag.text
+    if v is None: v = tag.text
     return (v or "").strip()
 
 def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
-    """
-    Parser específico para el XML de MeteoBahia (for-np.xml).
-    Extrae: Fecha, TMAX, TMIN, Prec (desde atributo value o texto).
-    """
     root = ET.fromstring(xml_bytes)
     rows = []
     for day in root.findall(".//day"):
@@ -107,36 +91,32 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
         precip_raw = _get_attr_or_text(day.find("precip"))
 
         fecha = pd.to_datetime(fecha_raw, errors="coerce")
-        if pd.isna(fecha):
+        if pd.isna(fecha): 
             continue
 
         def to_float(s, default=None):
             s = str(s).replace(",", ".")
-            try:
-                return float(s)
-            except:
-                return default
+            try: return float(s)
+            except: return default
 
-        tmax = to_float(tmax_raw, default=np.nan)
-        tmin = to_float(tmin_raw, default=np.nan)
-        prec = to_float(precip_raw, default=0.0)
-
-        rows.append({"Fecha": fecha.normalize(), "TMAX": tmax, "TMIN": tmin, "Prec": prec})
+        rows.append({
+            "Fecha": fecha.normalize(),
+            "TMAX": to_float(tmax_raw, default=np.nan),
+            "TMIN": to_float(tmin_raw, default=np.nan),
+            "Prec": to_float(precip_raw, default=0.0)
+        })
 
     if not rows:
         raise ValueError("No se encontraron elementos <day> con datos válidos en el XML.")
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["Fecha"]).sort_values("Fecha").reset_index(drop=True)
 
-    # Completar faltantes simples
     for col in ["TMAX", "TMIN", "Prec"]:
         if df[col].isna().any():
             df[col] = df[col].interpolate(limit_direction="both")
 
-    # Julian_days respecto al inicio de campaña (1/sep/2025 = día 1)
     base = pd.Timestamp("2025-09-01")
     df["Julian_days"] = (df["Fecha"] - base).dt.days + 1
-
     return df[["Fecha", "Julian_days", "TMAX", "TMIN", "Prec"]]
 
 # ================== Cache ==================
@@ -144,7 +124,7 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
 def get_model():
     return PracticalANNModel()
 
-@st.cache_data(ttl=30*60)  # 30 minutos
+@st.cache_data(ttl=30*60)
 def cached_fetch_xml(url: str) -> bytes:
     return _fetch_xml(url)
 
@@ -172,13 +152,10 @@ if fuente == "Subir Excel (.xlsx)":
         type=["xlsx"], accept_multiple_files=True
     )
 
-def _clasificar(v: float) -> str:
-    if v < THR_BAJO_MEDIO:
-        return "Bajo"
-    elif v <= THR_MEDIO_ALTO:
-        return "Medio"
-    else:
-        return "Alto"
+def _nivel(v: float) -> str:
+    if v < THR_BAJO_MEDIO: return "Bajo"
+    if v <= THR_MEDIO_ALTO: return "Medio"
+    return "Alto"
 
 def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     req = {"Julian_days", "TMAX", "TMIN", "Prec", "Fecha"}
@@ -186,29 +163,33 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"{nombre}: faltan columnas requeridas {sorted(list(req - set(df.columns)))}")
         return
 
-    # =================== FILTRO DURO ANTES DE PREDICCIÓN ===================
     df = df.copy()
     df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.normalize()
 
-    # Solo datos dentro de campaña: 01/09/2025 .. 01/02/2026 (incl.)
-    mask = (df["Fecha"] >= PERIODO_INICIO) & (df["Fecha"] <= PERIODO_FIN)
-    df = df.loc[mask].sort_values("Fecha").reset_index(drop=True)
-
+    # -------- Corte ANTES de predecir: el modelo se detiene el 1/feb --------
+    df = df[(df["Fecha"] >= PERIODO_INICIO) & (df["Fecha"] <= PERIODO_FIN)]
+    df = df.sort_values("Fecha").reset_index(drop=True)
     if df.empty:
         st.warning(f"Sin datos entre {PERIODO_INICIO.date()} y {PERIODO_FIN.date()} para {nombre}.")
         return
 
-    # Entradas al modelo (SOLO dentro del período) → la predicción se detiene el 1/feb
     X_real = df[["Julian_days", "TMAX", "TMIN", "Prec"]].to_numpy()
     pred = modelo.predict(X_real)
 
-    # Unir predicción con fechas/índices del período
+    # Unir + cálculos DENTRO del período
     pred["Fecha"] = df["Fecha"].values
     pred["Julian_days"] = df["Julian_days"].values
 
-    # Cálculos (todo dentro del período, reinicia en 0 el 1/sep)
-    pred["Nivel_Emergencia_relativa"] = pred["EMERREL(0-1)"].apply(_clasificar)
+    # MA5 centrada
     pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1, center=True).mean()
+
+    # -------- Corte FINAL DURO (por si algo se cola) --------
+    pred = pred[pred["Fecha"] <= PERIODO_FIN].copy()
+    # Cortar MA5 también al 1/feb
+    pred.loc[pred["Fecha"] > PERIODO_FIN, "EMERREL_MA5"] = np.nan
+
+    # Clasificación y acumulados reiniciando el 1/sep
+    pred["Nivel_Emergencia_relativa"] = pred["EMERREL(0-1)"].apply(_nivel)
     pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
     pred["EMEAC (0-1) - mínimo"]    = pred["EMERREL acumulado"] / EMEAC_MIN_DEN
     pred["EMEAC (0-1) - máximo"]    = pred["EMERREL acumulado"] / EMEAC_MAX_DEN
@@ -282,7 +263,6 @@ if fuente == "Subir Excel (.xlsx)":
     if uploaded_files:
         for file in uploaded_files:
             df = pd.read_excel(file)
-            # Si no trae 'Fecha', la derivamos desde la campaña (1/sep/2025 = día 1)
             if "Fecha" not in df.columns and "Julian_days" in df.columns:
                 base = pd.Timestamp("2025-09-01")
                 df["Fecha"] = base + pd.to_timedelta(df["Julian_days"] - 1, unit="D")
@@ -290,12 +270,12 @@ if fuente == "Subir Excel (.xlsx)":
     else:
         st.info("Sube al menos un archivo .xlsx para iniciar el análisis.")
 else:
-    # API MeteoBahia
     try:
         xml_bytes = cached_fetch_xml(API_URL)
         df_api = parse_meteobahia_xml(xml_bytes)
-        st.success(f"API MeteoBahia cargada: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} días")
+        st.success(f"API MeteoBahia: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} días")
         procesar_y_mostrar(df_api, nombre="MeteoBahia_API")
     except Exception as e:
         st.error(f"No se pudo leer la API MeteoBahia: {e}")
+
 
