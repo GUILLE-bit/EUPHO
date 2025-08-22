@@ -14,7 +14,7 @@ COLOR_FALLBACK = "#808080"
 
 # Denominadores de EMEAC (mín / máx de banda; ajustable = input usuario)
 EMEAC_MIN_DEN = 1.60
-EMEAC_MAX_DEN = 2.10
+EMEAC_MAX_DEN = 5.0
 
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-np.xml"
 
