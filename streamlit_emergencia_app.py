@@ -7,8 +7,8 @@ import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 
 # ================== Configuración visual y constantes ==================
-THR_BAJO_MEDIO = 0.20
-THR_MEDIO_ALTO = 0.79
+THR_BAJO_MEDIO = 0.25
+THR_MEDIO_ALTO = 0.90
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
 COLOR_FALLBACK = "#808080"
 
