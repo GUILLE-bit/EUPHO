@@ -8,7 +8,7 @@ from urllib.request import urlopen, Request
 
 # ================== Configuración visual y constantes ==================
 THR_BAJO_MEDIO = 0.25
-THR_MEDIO_ALTO = 0.90
+THR_MEDIO_ALTO = 0.75
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
 COLOR_FALLBACK = "#808080"
 
