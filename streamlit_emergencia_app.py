@@ -235,6 +235,12 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     for col in ["EMEAC (0-1) - mínimo", "EMEAC (0-1) - máximo", "EMEAC (0-1) - ajustable"]:
         pred[col.replace("(0-1)", "(%)")] = (pred[col] * 100).clip(0, 100)
 
+    # ---------------------------
+    # ⚡ Regla global: si EMEAC ajustable < 10%, el Nivel es siempre "Bajo"
+    mask_bajo = pred["EMEAC (%) - ajustable"] < 10
+    pred.loc[mask_bajo, "Nivel_Emergencia_relativa"] = "Bajo"
+    # ---------------------------
+
     # Media móvil 5 días
     pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
 
