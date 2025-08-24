@@ -17,7 +17,7 @@ EMEAC_MIN_DEN = 5.0
 EMEAC_MAX_DEN = 15.0
 
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-np.xml"
-PRON_DIAS_API = 7  # usar solo los primeros 7 días (API y Excel)
+PRON_DIAS_API = 8  # usar solo los primeros 8 días (API y Excel)
 
 # ======= Fechas (incluir hasta 31 de enero) =======
 fecha_inicio = pd.to_datetime("2025-09-01")
